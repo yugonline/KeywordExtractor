@@ -54,7 +54,7 @@ def create_inspec_dataset_for_bert_and_graph():
                 abstract = preprocess_text(f.read().strip())
 
             with open(
-                os.path.join(DATA_PATH, filename.replace(".abstr", ".uncontr")), "r"
+                    os.path.join(DATA_PATH, filename.replace(".abstr", ".uncontr")), "r"
             ) as f:
                 keywords = f.read().strip().split("\n")
 
@@ -82,24 +82,35 @@ def create_inspec_dataset_for_bert_and_graph():
             abstract = data["abstract"]
             keywords = data["keywords"]
 
-            # Text Learning using BERT
-            inputs = tokenizer(
+            # Text Learning using BERT for abstract
+            inputs_abstract = tokenizer(
                 abstract, return_tensors="pt", truncation=True, padding=True
             )
             with torch.no_grad():
-                outputs = model(**inputs.to(device))  # Move inputs to GPU
-            bert_embeddings = outputs.last_hidden_state
-            averaged_bert_embeddings = torch.mean(bert_embeddings, dim=1)
+                outputs_abstract = model(**inputs_abstract.to(device))
+            bert_embeddings_abstract = outputs_abstract.last_hidden_state
+            averaged_bert_embeddings_abstract = torch.mean(bert_embeddings_abstract, dim=1)
+
+            # Text Learning using BERT for keywords  <-- CHANGED
+            inputs_keywords = tokenizer(
+                ' '.join(keywords), return_tensors="pt", truncation=True, padding=True
+            )
+            with torch.no_grad():
+                outputs_keywords = model(**inputs_keywords.to(device))
+            bert_embeddings_keywords = outputs_keywords.last_hidden_state
+            averaged_bert_embeddings_keywords = torch.mean(bert_embeddings_keywords, dim=1)
 
             # Create a graph for the current abstract
             current_graph = create_cooccurrence_graph(abstract)
 
             # Get graph embeddings using the trained Node2Vec model
             graph_embeddings = {}
+            counter = 0
             for node in tokenizer.tokenize(abstract):
                 if node in node2vec_model.wv:
                     graph_embeddings[node] = node2vec_model.wv[node]
                 else:
+                    counter += 1
                     graph_embeddings[node] = torch.zeros(64)
 
             # Ensure the graph embeddings are in the same order as the tokens
@@ -114,9 +125,10 @@ def create_inspec_dataset_for_bert_and_graph():
                 token_order_embeddings, dim=0, keepdim=True
             )
 
-            # Concatenate the embeddings
+            # Concatenate the embeddings (including keyword embeddings)  <-- CHANGED
             concatenated_embeddings = torch.cat(
-                (averaged_bert_embeddings, averaged_token_order_embeddings), dim=-1
+                (averaged_bert_embeddings_abstract, averaged_token_order_embeddings, averaged_bert_embeddings_keywords),
+                dim=-1
             )
 
             dataset.append(
@@ -197,15 +209,13 @@ print(f"TEST SET LENGTH: #{len(test_dataset)}")
 
 
 class KeywordClassifier(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim):
+    def __init__(self, input_dim, output_dim):
         super(KeywordClassifier, self).__init__()
-        self.rnn = nn.LSTM(input_dim, hidden_dim, batch_first=True)
-        self.fc = nn.Linear(hidden_dim, output_dim)
+        self.fc = nn.Linear(input_dim, output_dim)  # Fully Connected layer
         self.softmax = nn.LogSoftmax(dim=2)
 
     def forward(self, x):
-        rnn_out, _ = self.rnn(x)
-        x = self.fc(rnn_out)
+        x = self.fc(x)
         return self.softmax(x)
 
 
@@ -216,20 +226,18 @@ print(f"Number of entries missing 'concatenated_embeddings': {len(missing_keys)}
 if missing_keys:
     print("Filenames of missing entries:", missing_keys)
 
-
 # Define the model, loss function, and optimizer
 input_dim = train_dataset[0]["concatenated_embeddings"].size(-1)
 print("INPUT DIM: " + str(input_dim))
-hidden_dim = 128
 output_dim = 3  # B, I, O
-# Before training, move the KeywordClassifier model to GPU:
-model = KeywordClassifier(input_dim, hidden_dim, output_dim).to(device)
+
+# Initialize the model without hidden_dim
+model = KeywordClassifier(input_dim, output_dim).to(device)
 
 # If you have multiple GPUs, wrap the model with nn.DataParallel
 if torch.cuda.device_count() > 1:
     print(f"Using {torch.cuda.device_count()} GPUs!")
     model = nn.DataParallel(model)
-
 
 criterion = nn.NLLLoss()
 optimizer = optim.Adam(model.parameters(), lr=0.01)
@@ -238,17 +246,12 @@ optimizer = optim.Adam(model.parameters(), lr=0.01)
 for epoch in range(100):  # Number of epochs
     model.train()
     for data in train_dataset:
-        # Ensure inputs tensor represents the entire sequence of tokens
-        inputs = (
-            data["concatenated_embeddings"].unsqueeze(0).to(device)
-        )  # Add batch dimension
+        inputs = data["concatenated_embeddings"].unsqueeze(0).to(device)  # Add batch dimension
         if inputs.shape[1] != len(data["abstract"].split()):  # Check sequence length
             continue  # Skip this iteration if sequence length doesn't match
 
         labels = label_keywords(data["abstract"], data["keywords"])
-        targets = (
-            labels_to_tensor(labels).unsqueeze(0).to(device)
-        )  # Add batch dimension
+        targets = labels_to_tensor(labels).unsqueeze(0).to(device)  # Add batch dimension
 
         optimizer.zero_grad()
         outputs = model(inputs)
@@ -263,13 +266,9 @@ for epoch in range(100):  # Number of epochs
     correct = 0
     with torch.no_grad():
         for data in val_dataset:
-            inputs = (
-                data["concatenated_embeddings"].unsqueeze(0).to(device)
-            )  # Add batch dimension
+            inputs = data["concatenated_embeddings"].unsqueeze(0).to(device)  # Add batch dimension
             labels = label_keywords(data["abstract"], data["keywords"])
-            targets = (
-                labels_to_tensor(labels).unsqueeze(0).to(device)
-            )  # Add batch dimension
+            targets = labels_to_tensor(labels).unsqueeze(0).to(device)  # Add batch dimension
 
             outputs = model(inputs)
             _, predicted = torch.max(outputs.data, 2)

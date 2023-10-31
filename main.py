@@ -1,4 +1,5 @@
 import os
+import random
 
 import numpy as np
 import torch
@@ -6,6 +7,7 @@ import string
 
 from node2vec import Node2Vec
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.manifold import TSNE
 from sklearn.metrics import accuracy_score
 from torch import nn, optim
 from transformers import BertTokenizer, BertModel
@@ -13,7 +15,7 @@ import networkx as nx
 from collections import defaultdict
 from sklearn.model_selection import train_test_split
 from nltk.corpus import stopwords
-
+from nltk import WordNetLemmatizer
 
 # 1. Set up the device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -28,6 +30,35 @@ FILE_LIMIT = 10_000
 # Initialize BERT tokenizer and model
 tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
 model = BertModel.from_pretrained("bert-base-uncased").to(device)
+
+
+# # Create an instance of the lemmatizer
+# lemmatizer = WordNetLemmatizer()
+#
+#
+# def preprocess_text(text):
+#     # Remove punctuation
+#     text = text.translate(str.maketrans("", "", string.punctuation))
+#
+#     # Remove stopwords
+#     stop_words = set(stopwords.words("english"))
+#     text = " ".join([word for word in text.split() if word.lower() not in stop_words])
+#
+#     # Lemmatize the words (uncomment the next line to apply lemmatization)
+#     # text = " ".join([lemmatizer.lemmatize(word) for word in text.split()])
+#
+#     return text
+import matplotlib
+matplotlib.use('TkAgg')
+import matplotlib.pyplot as plt
+# import random
+#
+# # Number of random words you want to pick
+num_words = 50
+
+
+
+
 
 
 def preprocess_text(text):
@@ -66,11 +97,62 @@ def create_inspec_dataset_for_bert_and_graph():
             graph = create_cooccurrence_graph(abstract)
             combined_graph = nx.compose(combined_graph, graph)
 
+            # Draw the graph
+            pos = nx.spring_layout(combined_graph)  # positions for all nodes
+
+            # Set the background color of the entire figure to grey
+            plt.figure(figsize=(10, 10), facecolor='grey')
+
+            # Draw nodes with black color
+            nx.draw_networkx_nodes(combined_graph, pos, node_color='black', node_size=500)
+
+            # Draw edges with default colors and the specified width and alpha
+            nx.draw_networkx_edges(combined_graph, pos, width=1.0, alpha=0.5)
+
+            # Draw labels with white font color
+            nx.draw_networkx_labels(combined_graph, pos, font_color='white', font_size=10)
+
+            # Set the background color of the axis area to grey
+            plt.gca().set_facecolor('grey')
+
+            plt.title("Word Co-occurrence Graph")
+            plt.axis('off')  # Turn off the axis for better visual
+            plt.show()
+
+    input("HELLOV2")
+
     # Train Node2Vec on the combined graph
     node2vec = Node2Vec(
         combined_graph, dimensions=64, walk_length=30, num_walks=200, workers=4
     )
     node2vec_model = node2vec.fit(window=10, min_count=1, batch_words=4)
+
+    # Randomly select words from the node2vec vocabulary
+    sample_words = random.sample(list(node2vec_model.wv.index_to_key), num_words)
+    embeddings = [node2vec_model.wv[word] for word in sample_words]
+    embeddings_matrix = np.vstack(embeddings)
+
+    # 2. Dimensionality Reduction using t-SNE
+    perplexity_value = len(embeddings_matrix) - 1
+
+    tsne = TSNE(n_components=2, random_state=42, perplexity=perplexity_value)
+    reduced_embeddings = tsne.fit_transform(embeddings_matrix)
+    
+    # 3. Plotting
+    plt.figure(figsize=(10, 10))
+    for i, word in enumerate(sample_words):
+        plt.scatter(reduced_embeddings[i, 0], reduced_embeddings[i, 1])
+        plt.annotate(
+            word,
+            xy=(reduced_embeddings[i, 0], reduced_embeddings[i, 1]),
+            xytext=(5, 2),
+            textcoords="offset points",
+            ha="right",
+            va="bottom",
+        )
+    plt.show()
+
+    input("HELLO")
 
     # Splitting the dataset
     train_data, temp_data = train_test_split(all_data, test_size=0.4, random_state=42)
@@ -277,6 +359,26 @@ for epoch in range(100):  # Number of epochs
 
     accuracy = 100 * correct / total
     print(f"Epoch {epoch+1}, Validation Accuracy: {accuracy:.2f}%")
+
+print("TESTING BEGINS")
+print("_______________________________________")
+
+    # Evaluation on test dataset
+model.eval()
+total = 0
+correct = 0
+with torch.no_grad():
+    for data in test_dataset:
+        inputs = data["concatenated_embeddings"].unsqueeze(0).to(device)
+        labels = label_keywords(data["abstract"], data["keywords"])
+        targets = labels_to_tensor(labels).unsqueeze(0).to(device)
+
+        outputs = model(inputs)
+        _, predicted = torch.max(outputs.data, 2)
+        total += targets.size(1)
+        correct += (predicted == targets).sum().item()
+accuracy = 100 * correct / total
+print(f"Test Accuracy: {accuracy:.2f}%")
 
 
 # ## CLASSIC ML CLASSIFIER

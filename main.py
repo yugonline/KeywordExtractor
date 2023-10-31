@@ -5,6 +5,9 @@ import numpy as np
 import torch
 import string
 
+import xml.etree.ElementTree as ET
+import json
+
 from node2vec import Node2Vec
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.manifold import TSNE
@@ -49,16 +52,16 @@ model = BertModel.from_pretrained("bert-base-uncased").to(device)
 #
 #     return text
 import matplotlib
-matplotlib.use('TkAgg')
+
+matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
+
 # import random
 #
 # # Number of random words you want to pick
 num_words = 50
 
-
-
-
+DATA_PATH = "data/Inspecv2"
 
 
 def preprocess_text(text):
@@ -71,23 +74,41 @@ def preprocess_text(text):
 
 
 def create_inspec_dataset_for_bert_and_graph():
-    filelimit = FILE_LIMIT
     all_data = []
     combined_graph = nx.Graph()  # Initialize a combined graph
 
-    # First pass: Read data and create the combined graph
-    for filename in os.listdir(DATA_PATH):
-        filelimit -= 1
-        if filelimit == 0:
-            break
-        if filename.endswith(".abstr"):
-            with open(os.path.join(DATA_PATH, filename), "r") as f:
-                abstract = preprocess_text(f.read().strip())
+    # Define the subdirectories and their corresponding JSON reference files
+    subdirs = ["train", "test", "dev"]
+    json_refs = {
+        "train": "references/train.uncontr.json",
+        "test": "references/test.uncontr.json",
+        "dev": "references/dev.uncontr.json",
+    }
 
-            with open(
-                    os.path.join(DATA_PATH, filename.replace(".abstr", ".uncontr")), "r"
-            ) as f:
-                keywords = f.read().strip().split("\n")
+    # Loop through each subdirectory
+    for subdir in subdirs:
+        # Load the JSON references for keywords
+        with open(os.path.join(DATA_PATH, json_refs[subdir]), "r") as json_file:
+            keyword_references = json.load(json_file)
+
+        # Read data and create the combined graph
+        for filename in os.listdir(os.path.join(DATA_PATH, subdir)):
+            if filename.endswith(".xml"):
+                tree = ET.parse(os.path.join(DATA_PATH, subdir, filename))
+                root = tree.getroot()
+
+                # Extracting the abstract from the XML structure
+                abstract_tokens = []
+                for sentence in root.findall(".//sentence"):
+                    for token in sentence.findall(".//token"):
+                        word = token.find("word").text
+                        abstract_tokens.append(word)
+                abstract = " ".join(abstract_tokens)
+                abstract = preprocess_text(abstract)
+
+            # Get keywords using the filename (without extension) as the key
+            file_key = filename.split(".")[0]
+            keywords = keyword_references.get(file_key, [])
 
             all_data.append(
                 {"filename": filename, "abstract": abstract, "keywords": keywords}
@@ -97,29 +118,33 @@ def create_inspec_dataset_for_bert_and_graph():
             graph = create_cooccurrence_graph(abstract)
             combined_graph = nx.compose(combined_graph, graph)
 
-            # Draw the graph
-            pos = nx.spring_layout(combined_graph)  # positions for all nodes
+            # # Draw the graph
+            # pos = nx.spring_layout(combined_graph)  # positions for all nodes
+            #
+            # # Set the background color of the entire figure to grey
+            # plt.figure(figsize=(10, 10), facecolor="grey")
+            #
+            # # Draw nodes with black color
+            # nx.draw_networkx_nodes(
+            #     combined_graph, pos, node_color="black", node_size=500
+            # )
+            #
+            # # Draw edges with default colors and the specified width and alpha
+            # nx.draw_networkx_edges(combined_graph, pos, width=1.0, alpha=0.5)
+            #
+            # # Draw labels with white font color
+            # nx.draw_networkx_labels(
+            #     combined_graph, pos, font_color="white", font_size=10
+            # )
+            #
+            # # Set the background color of the axis area to grey
+            # plt.gca().set_facecolor("grey")
+            #
+            # plt.title("Word Co-occurrence Graph")
+            # plt.axis("off")  # Turn off the axis for better visual
+            # plt.show()
 
-            # Set the background color of the entire figure to grey
-            plt.figure(figsize=(10, 10), facecolor='grey')
-
-            # Draw nodes with black color
-            nx.draw_networkx_nodes(combined_graph, pos, node_color='black', node_size=500)
-
-            # Draw edges with default colors and the specified width and alpha
-            nx.draw_networkx_edges(combined_graph, pos, width=1.0, alpha=0.5)
-
-            # Draw labels with white font color
-            nx.draw_networkx_labels(combined_graph, pos, font_color='white', font_size=10)
-
-            # Set the background color of the axis area to grey
-            plt.gca().set_facecolor('grey')
-
-            plt.title("Word Co-occurrence Graph")
-            plt.axis('off')  # Turn off the axis for better visual
-            plt.show()
-
-    input("HELLOV2")
+    # input("HELLOV2")
 
     # Train Node2Vec on the combined graph
     node2vec = Node2Vec(
@@ -137,7 +162,7 @@ def create_inspec_dataset_for_bert_and_graph():
 
     tsne = TSNE(n_components=2, random_state=42, perplexity=perplexity_value)
     reduced_embeddings = tsne.fit_transform(embeddings_matrix)
-    
+
     # 3. Plotting
     plt.figure(figsize=(10, 10))
     for i, word in enumerate(sample_words):
@@ -171,16 +196,20 @@ def create_inspec_dataset_for_bert_and_graph():
             with torch.no_grad():
                 outputs_abstract = model(**inputs_abstract.to(device))
             bert_embeddings_abstract = outputs_abstract.last_hidden_state
-            averaged_bert_embeddings_abstract = torch.mean(bert_embeddings_abstract, dim=1)
+            averaged_bert_embeddings_abstract = torch.mean(
+                bert_embeddings_abstract, dim=1
+            )
 
             # Text Learning using BERT for keywords  <-- CHANGED
             inputs_keywords = tokenizer(
-                ' '.join(keywords), return_tensors="pt", truncation=True, padding=True
+                " ".join(keywords), return_tensors="pt", truncation=True, padding=True
             )
             with torch.no_grad():
                 outputs_keywords = model(**inputs_keywords.to(device))
             bert_embeddings_keywords = outputs_keywords.last_hidden_state
-            averaged_bert_embeddings_keywords = torch.mean(bert_embeddings_keywords, dim=1)
+            averaged_bert_embeddings_keywords = torch.mean(
+                bert_embeddings_keywords, dim=1
+            )
 
             # Create a graph for the current abstract
             current_graph = create_cooccurrence_graph(abstract)
@@ -209,8 +238,12 @@ def create_inspec_dataset_for_bert_and_graph():
 
             # Concatenate the embeddings (including keyword embeddings)  <-- CHANGED
             concatenated_embeddings = torch.cat(
-                (averaged_bert_embeddings_abstract, averaged_token_order_embeddings, averaged_bert_embeddings_keywords),
-                dim=-1
+                (
+                    averaged_bert_embeddings_abstract,
+                    averaged_token_order_embeddings,
+                    averaged_bert_embeddings_keywords,
+                ),
+                dim=-1,
             )
 
             dataset.append(
@@ -328,12 +361,16 @@ optimizer = optim.Adam(model.parameters(), lr=0.01)
 for epoch in range(100):  # Number of epochs
     model.train()
     for data in train_dataset:
-        inputs = data["concatenated_embeddings"].unsqueeze(0).to(device)  # Add batch dimension
+        inputs = (
+            data["concatenated_embeddings"].unsqueeze(0).to(device)
+        )  # Add batch dimension
         if inputs.shape[1] != len(data["abstract"].split()):  # Check sequence length
             continue  # Skip this iteration if sequence length doesn't match
 
         labels = label_keywords(data["abstract"], data["keywords"])
-        targets = labels_to_tensor(labels).unsqueeze(0).to(device)  # Add batch dimension
+        targets = (
+            labels_to_tensor(labels).unsqueeze(0).to(device)
+        )  # Add batch dimension
 
         optimizer.zero_grad()
         outputs = model(inputs)
@@ -348,9 +385,13 @@ for epoch in range(100):  # Number of epochs
     correct = 0
     with torch.no_grad():
         for data in val_dataset:
-            inputs = data["concatenated_embeddings"].unsqueeze(0).to(device)  # Add batch dimension
+            inputs = (
+                data["concatenated_embeddings"].unsqueeze(0).to(device)
+            )  # Add batch dimension
             labels = label_keywords(data["abstract"], data["keywords"])
-            targets = labels_to_tensor(labels).unsqueeze(0).to(device)  # Add batch dimension
+            targets = (
+                labels_to_tensor(labels).unsqueeze(0).to(device)
+            )  # Add batch dimension
 
             outputs = model(inputs)
             _, predicted = torch.max(outputs.data, 2)
@@ -363,7 +404,7 @@ for epoch in range(100):  # Number of epochs
 print("TESTING BEGINS")
 print("_______________________________________")
 
-    # Evaluation on test dataset
+# Evaluation on test dataset
 model.eval()
 total = 0
 correct = 0
